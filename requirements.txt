@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+pydantic-settings
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+pyotp
+qrcode
+google-generativeai
+pypdf2
+pdfplumber
+requests
+jinja2
+python-dotenv
