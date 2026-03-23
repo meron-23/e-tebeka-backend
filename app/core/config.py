@@ -6,9 +6,6 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "E-Tebeka Platform"
     API_V1_STR: str = "/api/v1"
     
-    # Database
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://postgres:meronyeyenekonjo24@localhost:5432/e-tebeka_db")
-    
     # JWT
     JWT_SECRET: str = os.getenv("JWT_SECRET", "yoursecrethashtag2026!@#$")
     JWT_ALGORITHM: str = "HS256"
