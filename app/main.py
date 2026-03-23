@@ -14,7 +14,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "https://e-tebeka-frontendd.vercel.app/",
+        "https://e-tebeka-frontendd.vercel.app",
         "http://localhost:3001",
     ],
     allow_credentials=True,
