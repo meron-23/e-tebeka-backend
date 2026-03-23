@@ -1,7 +1,6 @@
 fastapi
 uvicorn
-sqlalchemy
-psycopg2-binary
+firebase-admin
 pydantic-settings
 python-jose[cryptography]
 passlib[bcrypt]
