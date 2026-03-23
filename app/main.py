@@ -16,6 +16,8 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "https://e-tebeka-frontendd.vercel.app",
         "http://localhost:3001",
+        # Allow all origins for development (remove in production)
+        "*"
     ],
     allow_credentials=True,
     allow_methods=["*"],
