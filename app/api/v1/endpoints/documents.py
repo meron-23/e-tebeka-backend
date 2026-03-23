@@ -1,13 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy.orm import Session
-from sqlalchemy import or_, func
+from fastapi.responses import FileResponse
+from google.cloud.firestore import Client
+from google.cloud import firestore
 from app.core.database import get_db
-from app.models.models import LegalDocument, DocumentSection, User, UserProfile, SearchHistory, Category
-from app.api.deps import get_current_user_optional
+from app.api.deps import get_current_user_optional, UserAuth
 from typing import List, Optional
 from pydantic import BaseModel
+from datetime import datetime, timezone
 import uuid
-from datetime import datetime
+import os
 
 router = APIRouter()
 
@@ -19,6 +20,7 @@ class DocumentSummary(BaseModel):
     document_type: str
     year_gregorian: Optional[int]
     status: str
+    pdf_url: Optional[str] = None
 
 class CategoryDetail(BaseModel):
     id: uuid.UUID
@@ -33,21 +35,30 @@ class SearchResponse(BaseModel):
     searches_left: int
 
 @router.get("/categories", response_model=List[CategoryDetail])
-def list_categories(db: Session = Depends(get_db)):
-    return db.query(Category).all()
+def list_categories(db: Client = Depends(get_db)):
+    docs = db.collection('categories').get()
+    categories = []
+    for doc in docs:
+        cat_data = doc.to_dict()
+        categories.append(CategoryDetail(id=doc.id, **cat_data))
+    return categories
 
 @router.get("/", response_model=List[DocumentSummary])
 def browse_documents(
     skip: int = 0, 
     limit: int = 20, 
     doc_type: Optional[str] = None,
-    db: Session = Depends(get_db)
+    db: Client = Depends(get_db)
 ):
-    query = db.query(LegalDocument)
+    query = db.collection('proclamations')
     if doc_type:
-        query = query.filter(LegalDocument.document_type == doc_type)
+        query = query.where('document_type', '==', doc_type)
     
-    documents = query.offset(skip).limit(limit).all()
+    docs = query.offset(skip).limit(limit).get()
+    
+    documents = []
+    for doc in docs:
+        documents.append(DocumentSummary(id=doc.id, **doc.to_dict()))
     return documents
 
 @router.get("/search", response_model=SearchResponse)
@@ -57,33 +68,38 @@ def search_documents(
     category_id: Optional[uuid.UUID] = Query(None),
     page: int = 1,
     limit: int = 10,
-    db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user_optional)
+    db: Client = Depends(get_db),
+    current_user: Optional[UserAuth] = Depends(get_current_user_optional)
 ):
-    # Determine search limit
-    search_limit = 100 # Temporarily increased for debugging from 5
+    search_limit = 5
     is_unlimited = False
     
-    if current_user:
-        if current_user.tier in ["A", "B"] or current_user.is_admin:
-            is_unlimited = True
-            search_limit = 999999
+    if current_user and (current_user.tier in ["A", "B"] or current_user.is_admin):
+        is_unlimited = True
+        search_limit = 999999
     
     # Check current searches today
-    today = datetime.utcnow().date()
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     
+    search_count = 0
     if current_user:
-        search_count = db.query(SearchHistory).filter(
-            SearchHistory.user_id == current_user.id,
-            func.date(SearchHistory.searched_at) == today
-        ).count()
+        history_ref = db.collection('users').document(current_user.id).collection('search_history')
+        # Simple count for today
+        docs = history_ref.where('searched_at', '>=', today_start).get()
+        search_count = len(docs)
     else:
+        # For anonymous users, use IP-based tracking in a simple collection
         ip = request.client.host
-        search_count = db.query(SearchHistory).filter(
-            SearchHistory.ip_address == ip,
-            SearchHistory.user_id == None,
-            func.date(SearchHistory.searched_at) == today
-        ).count()
+        anon_ref = db.collection('anonymous_searches')
+        try:
+            # Use a simple query with just the date filter to avoid index issues
+            today_str = today_start.strftime('%Y-%m-%d')
+            docs = anon_ref.where('ip_address', '==', ip).where('date', '==', today_str).get()
+            search_count = len(docs)
+        except Exception as e:
+            # If the query fails due to missing index, fall back to no tracking for anonymous users
+            print(f"Anonymous search tracking failed: {e}")
+            search_count = 0
         
     if search_count >= search_limit and not is_unlimited:
         raise HTTPException(
@@ -91,39 +107,70 @@ def search_documents(
             detail="Daily search limit reached. Please register or log in for more access."
         )
     
-    # Search logic across title and content
-    offset = (page - 1) * limit
-    
-    query_obj = db.query(LegalDocument)
-    
-    # Apply category filter if provided
+    # Resolve category name if category_id provided
+    category_name = None
     if category_id:
-        query_obj = query_obj.join(LegalDocument.categories).filter(Category.id == category_id)
+        cat_doc = db.collection('categories').document(str(category_id)).get()
+        if cat_doc.exists:
+            category_name = cat_doc.to_dict().get("name_en")
+
+    # Client-side filtering for MVP (since document count is low)
+    all_docs = db.collection('proclamations').get()
+    results = []
     
-    results = query_obj.filter(
-        or_(
-            LegalDocument.title_en.ilike(f"%{q}%"),
-            LegalDocument.title_am.ilike(f"%{q}%"),
-            LegalDocument.document_number.ilike(f"%{q}%")
-        )
-    ).offset(offset).limit(limit).all()
+    q_lower = q.lower()
+    for doc in all_docs:
+        data = doc.to_dict()
+        
+        # Category filter
+        cats = data.get('categories', [])
+        if category_name and category_name not in cats:
+            continue
+            
+        # Search match
+        title_en = data.get('title_en', '').lower()
+        title_am = data.get('title_am', '').lower()
+        doc_num = data.get('document_number', '').lower()
+        
+        if q_lower in title_en or q_lower in title_am or q_lower in doc_num:
+            results.append(DocumentSummary(id=doc.id, **data))
+    
+    # Pagination
+    offset = (page - 1) * limit
+    paginated_results = results[offset:offset + limit]
 
     # Log the search
-    new_search = SearchHistory(
-        user_id=current_user.id if current_user else None,
-        query=q,
-        ip_address=request.client.host if not current_user else None,
-        result_count=len(results)
-    )
-    db.add(new_search)
-    db.commit()
+    if current_user:
+        history_ref = db.collection('users').document(current_user.id).collection('search_history')
+        history_ref.add({
+            "query": q,
+            "filters": {"category_id": str(category_id)} if category_id else {},
+            "result_count": len(results),
+            "searched_at": firestore.SERVER_TIMESTAMP
+        })
+    else:
+        # Log anonymous search for tracking
+        ip = request.client.host
+        today_str = today_start.strftime('%Y-%m-%d')
+        anon_ref = db.collection('anonymous_searches')
+        try:
+            anon_ref.add({
+                "ip_address": ip,
+                "date": today_str,
+                "query": q,
+                "result_count": len(results),
+                "searched_at": firestore.SERVER_TIMESTAMP
+            })
+        except Exception as e:
+            print(f"Failed to log anonymous search: {e}")
+
     
     return {
         "query": q,
         "page": page,
         "limit": limit,
-        "results": results,
-        "searches_left": max(0, search_limit - search_count - 1) if not is_unlimited else 999
+        "results": paginated_results,
+        "searches_left": -1 if is_unlimited else max(0, search_limit - search_count)
     }
 
 class SectionDetail(BaseModel):
@@ -141,14 +188,46 @@ class DocumentDetailResponse(BaseModel):
     sections: List[SectionDetail]
 
 @router.get("/{document_id}", response_model=DocumentDetailResponse)
-def get_document_detail(document_id: uuid.UUID, db: Session = Depends(get_db)):
-    document = db.query(LegalDocument).filter(LegalDocument.id == document_id).first()
-    if not document:
+def get_document_detail(document_id: str, db: Client = Depends(get_db)):
+    doc_ref = db.collection('proclamations').document(document_id)
+    doc_snap = doc_ref.get()
+    
+    if not doc_snap.exists:
         raise HTTPException(status_code=404, detail="Document not found")
     
-    sections = db.query(DocumentSection).filter(DocumentSection.document_id == document_id).order_by(DocumentSection.sequence_order).all()
+    data = doc_snap.to_dict()
+    
+    # Extract sections from the 'articles' array embedded in the document
+    sections_data = data.get('articles', [])
+    sections = []
+    
+    for i, sec in enumerate(sections_data):
+        sections.append(SectionDetail(
+            section_type=sec.get('section_type', 'article'),
+            section_number=sec.get('section_number'),
+            section_number_am=sec.get('section_number_am'),
+            title_am=sec.get('title_am'),
+            title_en=sec.get('title_en'),
+            content_am=sec.get('content_am'),
+            content_en=sec.get('content_en'),
+            sequence_order=sec.get('sequence_order', i)
+        ))
+        
+    document_summary = DocumentSummary(id=doc_ref.id, **data)
     
     return {
-        "document": document,
+        "document": document_summary,
         "sections": sections
     }
+
+@router.get("/uploads/{filename}")
+def download_file(filename: str):
+    file_path = os.path.join("uploads", filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    return FileResponse(
+        file_path,
+        media_type='application/pdf',
+        filename=filename
+    )
