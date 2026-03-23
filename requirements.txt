@@ -14,3 +14,4 @@ pdfplumber
 requests
 jinja2
 python-dotenv
+email-validator
