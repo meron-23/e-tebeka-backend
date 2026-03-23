@@ -1,8 +1,5 @@
 from fastapi import Request, HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
-from sqlalchemy.orm import Session
-from app.core.database import SessionLocal
-from app.models.models import User, UserProfile, TierLimit
 from datetime import datetime
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
