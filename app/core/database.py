@@ -1,16 +1,26 @@
-from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
-from app.core.config import settings
+import firebase_admin
+from firebase_admin import credentials, firestore
+import os
+import json
 
-engine = create_engine(settings.DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+if not firebase_admin._apps:
+    try:
+        # Try to get Firebase config from environment variable first (for production)
+        firebase_config = os.getenv("FIREBASE_CONFIG")
+        if firebase_config:
+            # Parse JSON from environment variable
+            cred_dict = json.loads(firebase_config)
+            cred = credentials.Certificate(cred_dict)
+        else:
+            # Fallback to local file for development
+            key_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "service-account-key.json")
+            cred = credentials.Certificate(key_path)
+        
+        firebase_admin.initialize_app(cred)
+    except Exception as e:
+        print(f"Error initializing Firebase Admin: {e}")
 
-Base = declarative_base()
+db = firestore.client()
 
 def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    yield db
