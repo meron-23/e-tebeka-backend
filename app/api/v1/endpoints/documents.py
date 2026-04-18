@@ -84,22 +84,34 @@ def search_documents(
     search_count = 0
     if current_user:
         history_ref = db.collection('users').document(current_user.id).collection('search_history')
-        # Simple count for today
-        docs = history_ref.where('searched_at', '>=', today_start).get()
-        search_count = len(docs)
+        try:
+            # Fetch all history for user, filter by date in Python to avoid missing index errors
+            all_docs = history_ref.get()
+            for d in all_docs:
+                doc_data = d.to_dict()
+                # Check if we have the date string (for newly added)
+                today_str = today_start.strftime('%Y-%m-%d')
+                if doc_data.get('date') == today_str:
+                    search_count += 1
+                elif doc_data.get('searched_at') and hasattr(doc_data['searched_at'], 'timestamp'):
+                    if doc_data['searched_at'] >= today_start:
+                        search_count += 1
+        except Exception as e:
+            print(f"User search tracking failed: {e}")
+            search_count = 999
     else:
         # For anonymous users, use IP-based tracking in a simple collection
         ip = request.client.host
         anon_ref = db.collection('anonymous_searches')
         try:
-            # Use a simple query with just the date filter to avoid index issues
+            # Fetch by IP only to avoid compound index requirements, then filter by date in Python
             today_str = today_start.strftime('%Y-%m-%d')
-            docs = anon_ref.where('ip_address', '==', ip).where('date', '==', today_str).get()
-            search_count = len(docs)
+            all_ip_docs = anon_ref.where('ip_address', '==', ip).get()
+            search_count = sum(1 for d in all_ip_docs if d.to_dict().get('date') == today_str)
         except Exception as e:
-            # If the query fails due to missing index, fall back to no tracking for anonymous users
+            # If it still fails, heavily penalize or just assume they have reached the limit to prevent abuse bypassing the limit
             print(f"Anonymous search tracking failed: {e}")
-            search_count = 0
+            search_count = 999
         
     if search_count >= search_limit and not is_unlimited:
         raise HTTPException(
@@ -142,10 +154,12 @@ def search_documents(
     # Log the search
     if current_user:
         history_ref = db.collection('users').document(current_user.id).collection('search_history')
+        today_str = today_start.strftime('%Y-%m-%d')
         history_ref.add({
             "query": q,
             "filters": {"category_id": str(category_id)} if category_id else {},
             "result_count": len(results),
+            "date": today_str,
             "searched_at": firestore.SERVER_TIMESTAMP
         })
     else:
@@ -170,7 +184,7 @@ def search_documents(
         "page": page,
         "limit": limit,
         "results": paginated_results,
-        "searches_left": -1 if is_unlimited else max(0, search_limit - search_count)
+        "searches_left": -1 if is_unlimited else max(0, search_limit - (search_count + 1))
     }
 
 class SectionDetail(BaseModel):

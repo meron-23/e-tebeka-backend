@@ -92,6 +92,13 @@ def login(user_in: UserLogin, db: Client = Depends(get_db)):
             "email": user_data.get('email'),
             "full_name": user_data.get('full_name'),
             "tier": user_data.get('tier'),
-            "is_admin": user_data.get('is_admin', False)
+            "status": user_data.get('status'),
+            "is_admin": user_data.get('is_admin', False),
+            "profile": user_data.get('profile'),
         }
     }
+
+
+@router.post("/logout")
+def logout():
+    return {"message": "Logged out successfully"}

@@ -1,25 +1,66 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from google.cloud.firestore import Client
 from google.cloud import firestore
 from app.core.database import get_db
-from app.core.gemini import extract_document_data
+from app.api.deps import get_current_user, UserAuth
+from app.core.config import settings
 import uuid
 import os
+import requests
 import shutil
 from typing import List, Optional
-import PyPDF2
-import pdfplumber
-import io
-import json
 
 router = APIRouter()
+
+EMAILJS_ENDPOINT = "https://api.emailjs.com/api/v1.0/email/send"
+EMAILJS_SERVICE_ID = settings.EMAILJS_SERVICE_ID or "service_c2ui0om"
+EMAILJS_TEMPLATE_ID = settings.EMAILJS_TEMPLATE_ID or "template_t11rarq"
+EMAILJS_PUBLIC_KEY = settings.EMAILJS_PUBLIC_KEY or "UCMBkkWS1bxKc5ujR"
+EMAILJS_PRIVATE_KEY = settings.EMAILJS_PRIVATE_KEY
+FRONTEND_LOGIN_URL = f"{os.getenv('FRONTEND_URL', 'http://localhost:3000').rstrip('/')}/login"
+
+
+def require_admin(current_user: UserAuth = Depends(get_current_user)) -> UserAuth:
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+    return current_user
+
+
+def send_student_approval_email(user_email: str, user_name: str):
+    # Extract first name from full name
+    first_name = user_name.split(" ")[0] if user_name else "Student"
+    
+    payload = {
+        "service_id": EMAILJS_SERVICE_ID,
+        "template_id": EMAILJS_TEMPLATE_ID,
+        "user_id": EMAILJS_PUBLIC_KEY,
+        "template_params": {
+            "to_email": user_email,
+            "to_name": first_name,
+            "user_name": first_name,
+            "email": user_email,
+            "website_link": FRONTEND_LOGIN_URL,
+            "company_email": "noreply@e-tebeka.gov.et",
+        },
+    }
+    if EMAILJS_PRIVATE_KEY:
+        payload["accessToken"] = EMAILJS_PRIVATE_KEY
+
+    response = requests.post(
+        EMAILJS_ENDPOINT,
+        headers={"Content-Type": "application/json"},
+        json=payload,
+        timeout=15,
+    )
+    response.raise_for_status()
 
 @router.post("/documents/upload")
 async def upload_document(
     file: UploadFile = File(...),
-    db: Client = Depends(get_db)
+    db: Client = Depends(get_db),
+    current_user: UserAuth = Depends(require_admin)
 ):
-    # Save file temporarily
+    # Save file permanently
     upload_dir = "uploads"
     if not os.path.exists(upload_dir):
         os.makedirs(upload_dir)
@@ -28,103 +69,38 @@ async def upload_document(
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     
-    # Create upload job
-    jobs_ref = db.collection('ocr_jobs')
-    job_ref = jobs_ref.document()
-    job_ref.set({
-        "original_filename": file.filename,
-        "status": "pending",
-        "submitted_at": firestore.SERVER_TIMESTAMP
-    })
-    
-    return {"job_id": job_ref.id, "filename": file.filename}
+    return {"filename": file.filename, "file_path": file_path}
 
-@router.post("/documents/process-gemini/{job_id}")
-async def process_with_gemini(job_id: str, db: Client = Depends(get_db)):
-    job_ref = db.collection('ocr_jobs').document(job_id)
-    job_doc = job_ref.get()
-    if not job_doc.exists:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    job_data = job_doc.to_dict()
-    file_path = os.path.join("uploads", job_data.get('original_filename', ''))
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    # Extract text from PDF
-    text = ""
-    try:
-        # Try pdfplumber first (often better results)
-        with pdfplumber.open(file_path) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-        
-        # If pdfplumber failed or got very little text, try PyPDF2
-        if len(text.strip()) < 50:
-            with open(file_path, "rb") as f:
-                reader = PyPDF2.PdfReader(f)
-                for page in reader.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text += page_text + "\n"
-    except Exception as e:
-        job_ref.update({
-            "status": "failed",
-            "gemini_response": {"error": f"Failed to extract text: {e}"}
-        })
-        raise HTTPException(status_code=500, detail=f"Failed to extract text: {e}")
-    
-    # Send to Gemini
-    gemini_data = extract_document_data(text)
-    
-    if "error" in gemini_data:
-        job_ref.update({
-            "status": "failed",
-            "gemini_response": gemini_data
-        })
-        return gemini_data
-    
-    job_ref.update({
-        "status": "completed",
-        "gemini_response": gemini_data
-    })
-    
-    return gemini_data
+@router.post("/documents/create")
+async def create_document(
+    payload: dict,
+    db: Client = Depends(get_db),
+    current_user: UserAuth = Depends(require_admin)
+):
+    if not payload:
+        raise HTTPException(status_code=400, detail="Document metadata is required")
 
-@router.post("/documents/confirm-upload/{job_id}")
-async def confirm_upload(job_id: str, payload: Optional[dict] = None, db: Client = Depends(get_db)):
-    job_ref = db.collection('ocr_jobs').document(job_id)
-    job_doc = job_ref.get()
-    
-    if not job_doc.exists:
-        raise HTTPException(status_code=400, detail="Job not found")
-        
-    job_data = job_doc.to_dict()
-    if job_data.get("status") != "completed":
-        raise HTTPException(status_code=400, detail="Job not ready")
-        
-    data = payload if payload else job_data.get("gemini_response")
+    data = payload
     
     # Save to proclamations
     doc_ref = db.collection('proclamations').document()
     doc_ref.set({
         "document_type": data.get("document_type", "proclamation"),
         "document_number": data.get("document_number"),
-        "document_number_am": data.get("document_number_am"),
-        "issuing_body_am": data.get("issuing_body_am"),
-        "issuing_body_en": data.get("issuing_body_en"),
-        "title_am": data.get("title_am"),
-        "title_en": data.get("title_en"),
-        "short_title_am": data.get("short_title_am"),
-        "short_title_en": data.get("short_title_en"),
-        "year_ec": data.get("year_ec"),
+        "document_number_am": data.get("document_number_am", ""),
+        "issuing_body_am": data.get("issuing_body_am", ""),
+        "issuing_body_en": data.get("issuing_body_en", ""),
+        "title_am": data.get("title_am", ""),
+        "title_en": data.get("title_en", ""),
+        "short_title_am": data.get("short_title_am", ""),
+        "short_title_en": data.get("short_title_en", ""),
+        "year_ec": data.get("year_ec", ""),
         "year_gregorian": data.get("year_gregorian"),
-        "pdf_url": job_data.get("original_filename"),
+        "pdf_url": data.get("pdf_url", ""),
         "status": "active",
         "categories": [c for c in data.get("categories", []) if c],
         "articles": data.get("articles", []),
+        "uploaded_by": current_user.id,
         "created_at": firestore.SERVER_TIMESTAMP
     })
     
@@ -144,7 +120,10 @@ async def confirm_upload(job_id: str, payload: Optional[dict] = None, db: Client
     return {"message": "Document created successfully", "document_id": doc_ref.id}
 
 @router.get("/users", response_model=List[dict])
-def list_users(db: Client = Depends(get_db)):
+def list_users(
+    db: Client = Depends(get_db),
+    current_user: UserAuth = Depends(require_admin)
+):
     users_docs = db.collection('users').get()
     return [
         {
@@ -159,7 +138,11 @@ def list_users(db: Client = Depends(get_db)):
     ]
 
 @router.patch("/users/{user_id}/admin")
-def promote_to_admin(user_id: str, db: Client = Depends(get_db)):
+def promote_to_admin(
+    user_id: str,
+    db: Client = Depends(get_db),
+    current_user: UserAuth = Depends(require_admin)
+):
     user_ref = db.collection('users').document(user_id)
     user_doc = user_ref.get()
     if not user_doc.exists:
@@ -169,7 +152,12 @@ def promote_to_admin(user_id: str, db: Client = Depends(get_db)):
     return {"message": f"User promoted to admin successfully"}
 
 @router.patch("/users/{user_id}/status")
-def update_user_status(user_id: str, status_data: dict, db: Client = Depends(get_db)):
+def update_user_status(
+    user_id: str,
+    status_data: dict,
+    db: Client = Depends(get_db),
+    current_user: UserAuth = Depends(require_admin)
+):
     user_ref = db.collection('users').document(user_id)
     if not user_ref.get().exists:
         raise HTTPException(status_code=404, detail="User not found")
@@ -182,7 +170,10 @@ def update_user_status(user_id: str, status_data: dict, db: Client = Depends(get
     return {"message": f"User status updated to {new_status}"}
 
 @router.get("/verifications", response_model=List[dict])
-def list_verifications(db: Client = Depends(get_db)):
+def list_verifications(
+    db: Client = Depends(get_db),
+    current_user: UserAuth = Depends(require_admin)
+):
     users_ref = db.collection('users')
     docs = users_ref.where('profile.verification_status', 'in', ['pending', 'verified', 'rejected']).get()
     
@@ -194,6 +185,8 @@ def list_verifications(db: Client = Depends(get_db)):
             verifications.append({
                 "id": doc.id,
                 "user_id": doc.id,
+                "user_name": data.get("full_name"),
+                "user_email": data.get("email"),
                 "student_id_number": profile.get("student_id"),
                 "university": profile.get("university"),
                 "status": profile.get("verification_status"),
@@ -203,7 +196,16 @@ def list_verifications(db: Client = Depends(get_db)):
     return verifications
 
 @router.patch("/verifications/{user_id}")
-def update_verification_status(user_id: str, status_data: dict, db: Client = Depends(get_db)):
+def update_verification_status(
+    user_id: str,
+    status_data: dict,
+    db: Client = Depends(get_db),
+    current_user: UserAuth = Depends(require_admin)
+):
+    print(f"=== VERIFICATION UPDATE START ===")
+    print(f"User ID: {user_id}")
+    print(f"Status data: {status_data}")
+    
     user_ref = db.collection('users').document(user_id)
     user_doc = user_ref.get()
     if not user_doc.exists:
@@ -213,6 +215,7 @@ def update_verification_status(user_id: str, status_data: dict, db: Client = Dep
     if new_status not in ["verified", "rejected"]:
         raise HTTPException(status_code=400, detail="Invalid status")
     
+    user_data = user_doc.to_dict()
     updates = {"profile.verification_status": new_status}
     
     # If verified, activate the user
@@ -220,10 +223,37 @@ def update_verification_status(user_id: str, status_data: dict, db: Client = Dep
         updates["status"] = "active"
             
     user_ref.update(updates)
-    return {"message": f"Verification {new_status}"}
+    email_sent = False
+    if new_status == "verified" and user_data.get("email"):
+        try:
+            print(f"Attempting to send email to: {user_data['email']}")
+            print(f"User name: {user_data.get('full_name') or user_data['email']}")
+            send_student_approval_email(
+                user_email=user_data["email"],
+                user_name=user_data.get("full_name") or user_data["email"],
+            )
+            print("Email sent successfully")
+            email_sent = True
+        except requests.RequestException as e:
+            print(f"EmailJS RequestException: {e}")
+            print(f"Response status: {e.response.status_code if hasattr(e, 'response') and e.response else 'N/A'}")
+            print(f"Response text: {e.response.text if hasattr(e, 'response') and e.response else 'N/A'}")
+            email_sent = False
+        except Exception as e:
+            print(f"Unexpected error sending email: {e}")
+            import traceback
+            traceback.print_exc()
+            email_sent = False
+    else:
+        print(f"Email not sent - status: {new_status}, has email: {bool(user_data.get('email'))}")
+
+    return {"message": f"Verification {new_status}", "email_sent": email_sent}
 
 @router.get("/stats")
-def get_admin_stats(db: Client = Depends(get_db)):
+def get_admin_stats(
+    db: Client = Depends(get_db),
+    current_user: UserAuth = Depends(require_admin)
+):
     docs = len(db.collection('proclamations').get())
     users = len(db.collection('users').get())
     pending = len(db.collection('users').where('profile.verification_status', '==', 'pending').get())

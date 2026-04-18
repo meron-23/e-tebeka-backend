@@ -1,26 +1,34 @@
+import json
+import os
+from pathlib import Path
+
 import firebase_admin
 from firebase_admin import credentials, firestore
-import os
-import json
+
+
+BASE_DIR = Path(__file__).resolve().parents[3]
+SERVICE_ACCOUNT_PATH = BASE_DIR / "service-account-key.json"
+
+
+def _get_firebase_credential() -> credentials.Certificate:
+    firebase_config = os.getenv("FIREBASE_CONFIG")
+    if firebase_config:
+        return credentials.Certificate(json.loads(firebase_config))
+
+    if SERVICE_ACCOUNT_PATH.exists():
+        return credentials.Certificate(str(SERVICE_ACCOUNT_PATH))
+
+    raise RuntimeError(
+        "Firebase credentials not found. Expected FIREBASE_CONFIG or "
+        f"'{SERVICE_ACCOUNT_PATH}'."
+    )
+
 
 if not firebase_admin._apps:
-    try:
-        # Try to get Firebase config from environment variable first (for production)
-        firebase_config = os.getenv("FIREBASE_CONFIG")
-        if firebase_config:
-            # Parse JSON from environment variable
-            cred_dict = json.loads(firebase_config)
-            cred = credentials.Certificate(cred_dict)
-        else:
-            # Fallback to local file for development
-            key_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "service-account-key.json")
-            cred = credentials.Certificate(key_path)
-        
-        firebase_admin.initialize_app(cred)
-    except Exception as e:
-        print(f"Error initializing Firebase Admin: {e}")
+    firebase_admin.initialize_app(_get_firebase_credential())
 
 db = firestore.client()
+
 
 def get_db():
     yield db

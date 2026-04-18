@@ -1,40 +1,45 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from google.cloud.firestore import Client
 from google.cloud import firestore
 from app.core.database import get_db
-from app.api.deps import get_current_user, UserAuth
+from app.api.deps import get_current_user, get_current_user_optional, UserAuth
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 
 router = APIRouter()
 
 @router.get("/")
+@router.get("/me")
 def get_users_profile(current_user: UserAuth = Depends(get_current_user)):
     return current_user
 
 @router.get("/me/stats")
 def get_user_stats(
+    request: Request,
     db: Client = Depends(get_db),
-    current_user: UserAuth = Depends(get_current_user)
+    current_user: Optional[UserAuth] = Depends(get_current_user_optional)
 ):
-    # Tier C (General) has 5 searches per day, A/B/Admin are unlimited
-    search_limit = 5 if current_user.tier == "C" else 999999
-    
-    # Check current searches today (timezone aware)
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     
-    history_ref = db.collection('users').document(current_user.id).collection('search_history')
-    docs = history_ref.where('searched_at', '>=', today_start).get()
-    search_count = len(docs)
-    
-    # Views count logic isn't fully implemented in the backend yet, just mocking it to 0 for now
-    views_limit = 10 if current_user.tier == "C" else 999999
-    views_count = 0
-    
+    if current_user:
+        search_limit = 5 if current_user.tier == "C" else -1
+        history_ref = db.collection('users').document(current_user.id).collection('search_history')
+        docs = history_ref.get()
+        search_count = sum(1 for d in docs if d.to_dict().get('date') == today_start.strftime('%Y-%m-%d') or (d.to_dict().get('searched_at') and getattr(d.to_dict().get('searched_at'), 'timestamp', lambda: 0)() and d.to_dict().get('searched_at') >= today_start))
+        views_limit = 10 if current_user.tier == "C" else -1
+    else:
+        search_limit = 5
+        ip = request.client.host
+        anon_ref = db.collection('anonymous_searches')
+        today_str = today_start.strftime('%Y-%m-%d')
+        all_ip_docs = anon_ref.where('ip_address', '==', ip).get()
+        search_count = sum(1 for d in all_ip_docs if d.to_dict().get('date') == today_str)
+        views_limit = 5
+        
     return {
         "searches_today": search_count,
         "search_limit": search_limit,
-        "views_today": views_count,
+        "views_today": 0,
         "views_limit": views_limit
     }
 
@@ -57,6 +62,29 @@ def get_user_history(
         })
         
     return history
+
+
+@router.get("/me/downloads")
+def get_user_downloads(
+    limit: int = 5,
+    db: Client = Depends(get_db),
+    current_user: UserAuth = Depends(get_current_user)
+):
+    downloads_ref = db.collection('users').document(current_user.id).collection('download_history')
+    docs = downloads_ref.order_by('downloaded_at', direction=firestore.Query.DESCENDING).limit(limit).get()
+
+    downloads = []
+    for doc in docs:
+        data = doc.to_dict()
+        downloads.append({
+            "id": doc.id,
+            "document_title": data.get("document_title"),
+            "document_number": data.get("document_number"),
+            "downloaded_at": data.get("downloaded_at"),
+            "file_size": data.get("file_size", 0)
+        })
+
+    return downloads
 
 @router.get("/me/bookmarks")
 def get_user_bookmarks(

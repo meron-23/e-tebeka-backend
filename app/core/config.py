@@ -1,5 +1,4 @@
 from pydantic_settings import BaseSettings
-from typing import List
 import os
 
 class Settings(BaseSettings):
@@ -12,19 +11,11 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     
-    # Gemini API
-    # Rotating keys
-    GEMINI_API_KEYS: List[str] = [
-        "AIzaSyAdYiPm8H9g8NyygFqmU0jUQrYTGf6Cqrw",
-        "AIzaSyBdYtAz1oD2URJnbwQ5tOgdOfIF-36OhOc",
-        "AIzaSyBRZgFEdBxMGdq3kLkp8d3HGkV2rhNSPbg",
-        "AIzaSyCkeAT1fUGXkWXnyaLZtB35SRuBu0VWLeY",
-        "AIzaSyBbJmlkMgM-50fpMNTbhZkFbmepTWEHvN8"
-    ]
-    GEMINI_MODEL: str = "gemini-2.5-flash"
-    
-    # Email (Placeholder)
-    EMAIL_API_KEY: str = os.getenv("EMAIL_API_KEY", "")
+    # Email (EmailJS)
+    EMAILJS_SERVICE_ID: str = os.getenv("EMAILJS_SERVICE_ID", "")
+    EMAILJS_TEMPLATE_ID: str = os.getenv("EMAILJS_TEMPLATE_ID", "")
+    EMAILJS_PUBLIC_KEY: str = os.getenv("EMAILJS_PUBLIC_KEY", "")
+    EMAILJS_PRIVATE_KEY: str = os.getenv("EMAILJS_PRIVATE_KEY", "")
     EMAIL_FROM: str = os.getenv("EMAIL_FROM", "noreply@e-tebeka.gov.et")
     
     # Storage

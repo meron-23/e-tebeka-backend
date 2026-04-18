@@ -8,6 +8,13 @@ from app.core.database import get_db
 from app.core.config import settings
 from pydantic import BaseModel
 
+class UserProfile(BaseModel):
+    university: Optional[str] = None
+    student_id: Optional[str] = None
+    bar_number: Optional[str] = None
+    verification_status: Optional[str] = None
+
+
 class UserAuth(BaseModel):
     id: str
     email: str
@@ -15,6 +22,7 @@ class UserAuth(BaseModel):
     tier: str
     status: str
     is_admin: bool = False
+    profile: Optional[UserProfile] = None
 
 
 oauth2_scheme = OAuth2PasswordBearer(
