@@ -6,8 +6,14 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 
-BASE_DIR = Path(__file__).resolve().parents[3]
-SERVICE_ACCOUNT_PATH = BASE_DIR / "service-account-key.json"
+BASE_DIR = Path(__file__).resolve().parents[2]  # e-tebeka-backend/
+REPO_ROOT = Path(__file__).resolve().parents[3]  # e-tebeka/
+
+# Check backend root first (when key is placed inside the backend folder),
+# then fall back to the repo root (legacy location).
+_backend_key = BASE_DIR / "service-account-key.json"
+_repo_key = REPO_ROOT / "service-account-key.json"
+SERVICE_ACCOUNT_PATH = _backend_key if _backend_key.exists() else _repo_key
 
 
 def _get_firebase_credential() -> credentials.Certificate:
@@ -19,8 +25,8 @@ def _get_firebase_credential() -> credentials.Certificate:
         return credentials.Certificate(str(SERVICE_ACCOUNT_PATH))
 
     raise RuntimeError(
-        "Firebase credentials not found. Expected FIREBASE_CONFIG or "
-        f"'{SERVICE_ACCOUNT_PATH}'."
+        "Firebase credentials not found. Expected FIREBASE_CONFIG env var or "
+        f"'service-account-key.json' in backend root or repo root."
     )
 
 

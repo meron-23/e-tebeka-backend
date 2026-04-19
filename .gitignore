@@ -84,3 +84,6 @@ Thumbs.db
 # Other
 *.swp
 *~
+
+# Firebase service account key — NEVER commit this
+service-account-key.json

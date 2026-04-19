@@ -4,7 +4,7 @@ services:
     name: etebeka-backend
     env: python
     plan: free
-    buildCommand: "pip install -r backend/requirements.txt"
+    buildCommand: "pip install -r requirements.txt"
     startCommand: "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
     envVars:
       - key: PYTHON_VERSION
@@ -13,3 +13,5 @@ services:
         generateValue: true
       - key: FIREBASE_CONFIG
         sync: false
+      - key: ALLOWED_ORIGINS
+        value: https://e-tebeka-frontendd.vercel.app
